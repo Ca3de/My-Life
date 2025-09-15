@@ -4,6 +4,9 @@
   --accent-color: #3f51b5;
   --card-bg: #fff;
   --divider-color: rgba(0,0,0,0.1);
+  --bg-color: #fdfdfd;
+  --text-color: #222;
+  --accent-color: #3f51b5;
 }
 
 body.dark {
@@ -20,6 +23,10 @@ html {
 
 body {
   font-family: 'Poppins', sans-serif;
+}
+
+body {
+  font-family: Arial, sans-serif;
   margin: 0;
   background: var(--bg-color);
   color: var(--text-color);
@@ -61,6 +68,19 @@ nav a:hover {
 
 #theme-toggle {
   margin-top: 1rem;
+}
+
+header {
+  background: var(--accent-color);
+  color: #fff;
+  padding: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  }
+
+#theme-toggle {
   background: #fff;
   color: var(--accent-color);
   border: none;
@@ -107,6 +127,23 @@ article:last-child {
 .contact {
   list-style: none;
   padding: 0;
+nav ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  gap: 1rem;
+}
+
+nav a {
+  color: #fff;
+  text-decoration: none;
+}
+
+section {
+  padding: 2rem;
+  max-width: 900px;
+  margin: auto;
 }
 
 .contact li {
