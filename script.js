@@ -182,10 +182,19 @@ const initQuantumBackground = () => {
   let dpr = Math.min(2.5, window.devicePixelRatio || 1);
   let animationFrame;
   let particles = [];
+  let pulses = [];
+  let lastTimestamp = performance.now();
+  let timeline = 0;
   let colors = {
     glow: '#4a60ff',
     glowSecondary: '#8b5cf6',
   };
+
+  const connectionLayers = [
+    { alpha: 0.68, lineWidth: 0.95, swing: 5, phase: 0 },
+    { alpha: 0.34, lineWidth: 1.35, swing: 10.5, phase: 1.6 },
+    { alpha: 0.22, lineWidth: 0.6, swing: 15.5, phase: 3.2 },
+  ];
 
   const pointer = {
     x: width / 2,
@@ -193,8 +202,10 @@ const initQuantumBackground = () => {
     targetX: width / 2,
     targetY: height / 2,
     radius: 3,
+    depth: 1,
     active: false,
     lastActive: 0,
+    charge: 0,
   };
 
   const setCanvasSize = () => {
@@ -227,12 +238,13 @@ const initQuantumBackground = () => {
     };
   };
 
-  const particleCount = () => Math.floor(Math.min(180, (width * height) / 9000));
-  const maxDistance = () => Math.min(240, Math.max(160, Math.sqrt(width * height) * 0.18));
+  const particleCount = () => Math.floor(Math.min(200, (width * height) / 8500));
+  const maxDistance = () => Math.min(260, Math.max(180, Math.sqrt(width * height) * 0.2));
 
   const createParticle = () => {
     const angle = Math.random() * Math.PI * 2;
-    const speed = 0.25 + Math.random() * 0.55;
+    const speed = 0.18 + Math.random() * 0.5;
+    const depth = 0.45 + Math.random() * 0.8;
 
     return {
       x: Math.random() * width,
@@ -240,6 +252,7 @@ const initQuantumBackground = () => {
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed,
       radius: 0.6 + Math.random() * 1.8,
+      depth,
       drift: Math.random() * Math.PI * 2,
       driftSpeed: 0.004 + Math.random() * 0.012,
     };
@@ -249,20 +262,42 @@ const initQuantumBackground = () => {
     particles = Array.from({ length: particleCount() }, createParticle);
   };
 
-  const updatePointer = () => {
-    pointer.x += (pointer.targetX - pointer.x) * 0.12;
-    pointer.y += (pointer.targetY - pointer.y) * 0.12;
+  const updatePointer = (delta) => {
+    const smoothing = 1 - Math.pow(0.86, delta / 16 || 1);
+    pointer.x += (pointer.targetX - pointer.x) * smoothing;
+    pointer.y += (pointer.targetY - pointer.y) * smoothing;
+    pointer.charge *= Math.pow(0.92, delta / 16 || 1);
   };
 
-  const updateParticles = () => {
+  const updateParticles = (delta) => {
     const wrapMargin = 80;
+    const limit = maxDistance();
+    const fieldRadius = limit * 1.35;
+    const frame = delta / 16 || 1;
 
     particles.forEach((particle) => {
-      particle.x += particle.vx;
-      particle.y += particle.vy;
-      particle.drift += particle.driftSpeed;
-      particle.x += Math.cos(particle.drift) * 0.35;
-      particle.y += Math.sin(particle.drift) * 0.35;
+      const depth = particle.depth || 0.6;
+      const layerFactor = 0.55 + depth * 0.9;
+      particle.x += particle.vx * frame * layerFactor;
+      particle.y += particle.vy * frame * layerFactor;
+      particle.drift += particle.driftSpeed * frame;
+      particle.x += Math.cos(particle.drift) * 0.35 * frame * layerFactor;
+      particle.y += Math.sin(particle.drift) * 0.35 * frame * layerFactor;
+
+      const dx = pointer.x - particle.x;
+      const dy = pointer.y - particle.y;
+      const distanceSq = dx * dx + dy * dy;
+
+      if (distanceSq < fieldRadius * fieldRadius) {
+        const distance = Math.sqrt(distanceSq) || 1;
+        const influence = (1 - distance / fieldRadius) * (pointer.active ? 0.45 : 0.25);
+        const chargeBoost = 0.5 + pointer.charge * 0.8;
+        particle.vx += ((dx / distance) * influence * chargeBoost * 0.04 * frame);
+        particle.vy += ((dy / distance) * influence * chargeBoost * 0.04 * frame);
+      }
+
+      particle.vx *= 0.992;
+      particle.vy *= 0.992;
 
       if (particle.x < -wrapMargin) particle.x = width + wrapMargin;
       if (particle.x > width + wrapMargin) particle.x = -wrapMargin;
@@ -271,8 +306,20 @@ const initQuantumBackground = () => {
     });
   };
 
+  const updatePulses = (delta) => {
+    const frame = delta / 16 || 1;
+    pulses = pulses.filter((pulse) => {
+      pulse.radius += frame * (42 + pulse.strength * 64);
+      pulse.alpha *= Math.pow(0.88, frame);
+      return pulse.alpha > 0.05;
+    });
+  };
+
   const drawParticle = (node, intensity = 1) => {
-    const radius = node.radius * (node === pointer ? 3.6 : 2.4);
+    const depth = node.depth || 0.8;
+    const pulseBoost = node === pointer ? 1 + pointer.charge * 1.8 : 1;
+    const baseMultiplier = node === pointer ? 2.4 : 1.8 + depth * 0.2;
+    const radius = node.radius * baseMultiplier * pulseBoost;
     const gradient = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, radius * 3);
     gradient.addColorStop(0, colors.glow);
     gradient.addColorStop(0.65, colors.glowSecondary);
@@ -282,55 +329,108 @@ const initQuantumBackground = () => {
     ctx.globalAlpha = 0.45 * intensity;
     ctx.fillStyle = gradient;
     ctx.shadowColor = colors.glowSecondary;
-    ctx.shadowBlur = 18 * intensity;
+    ctx.shadowBlur = 18 * intensity * (1 + (node.depth || 0.5) * 0.4);
     ctx.beginPath();
     ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   };
 
-  const drawConnections = (nodes) => {
+  const drawConnections = (nodes, elapsed) => {
     const limit = maxDistance();
     const limitSq = limit * limit;
 
-    for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const distanceSq = dx * dx + dy * dy;
+    connectionLayers.forEach((layer) => {
+      const offsetX = Math.cos(elapsed * 0.0008 + layer.phase) * layer.swing;
+      const offsetY = Math.sin(elapsed * 0.0011 + layer.phase) * layer.swing;
 
-        if (distanceSq > limitSq) continue;
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.shadowColor = colors.glowSecondary;
+      ctx.shadowBlur = 12 + layer.swing * 0.8;
 
-        const distance = Math.sqrt(distanceSq);
-        const alpha = 1 - distance / limit;
-        const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
-        gradient.addColorStop(0, colors.glow);
-        gradient.addColorStop(1, colors.glowSecondary);
+      for (let i = 0; i < nodes.length; i += 1) {
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const distanceSq = dx * dx + dy * dy;
 
-        ctx.save();
-        ctx.globalAlpha = alpha * 0.55;
-        ctx.strokeStyle = gradient;
-        ctx.lineWidth = 0.7 + alpha * 0.7;
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-        ctx.restore();
+          if (distanceSq > limitSq) continue;
+
+          const distance = Math.sqrt(distanceSq);
+          const depthA = a.depth || 1;
+          const depthB = b.depth || 1;
+          const depthMix = (depthA + depthB) / 2;
+          const alpha = (1 - distance / limit) * layer.alpha * (0.75 + depthMix * 0.35);
+          if (alpha <= 0) continue;
+
+          const startX = a.x + offsetX * depthA * 0.5;
+          const startY = a.y + offsetY * depthA * 0.5;
+          const endX = b.x - offsetX * depthB * 0.5;
+          const endY = b.y - offsetY * depthB * 0.5;
+          const gradient = ctx.createLinearGradient(startX, startY, endX, endY);
+          gradient.addColorStop(0, colors.glow);
+          gradient.addColorStop(1, colors.glowSecondary);
+
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = layer.lineWidth + depthMix * 0.6 + alpha * 0.9;
+          ctx.strokeStyle = gradient;
+          ctx.beginPath();
+          ctx.moveTo(startX, startY);
+          ctx.lineTo(endX, endY);
+          ctx.stroke();
+        }
       }
-    }
+
+      ctx.restore();
+    });
   };
 
-  const render = () => {
+  const drawPulses = () => {
+    pulses.forEach((pulse) => {
+      const gradient = ctx.createRadialGradient(
+        pulse.x,
+        pulse.y,
+        pulse.radius * 0.3,
+        pulse.x,
+        pulse.y,
+        pulse.radius * 1.15
+      );
+      gradient.addColorStop(0, colors.glow);
+      gradient.addColorStop(0.55, colors.glowSecondary);
+      gradient.addColorStop(1, 'transparent');
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.globalAlpha = pulse.alpha;
+      ctx.lineWidth = 2.5 + pulse.strength * 3;
+      ctx.strokeStyle = gradient;
+      ctx.shadowColor = colors.glowSecondary;
+      ctx.shadowBlur = 26;
+      ctx.beginPath();
+      ctx.arc(pulse.x, pulse.y, pulse.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    });
+  };
+
+  const render = (timestamp) => {
     animationFrame = requestAnimationFrame(render);
+
+    const delta = Math.min(64, (timestamp || performance.now()) - lastTimestamp || 16);
+    lastTimestamp = timestamp || performance.now();
+    timeline += delta;
 
     ctx.clearRect(0, 0, width, height);
 
-    updateParticles();
-    updatePointer();
+    updateParticles(delta);
+    updatePointer(delta);
+    updatePulses(delta);
 
-    const pointerVisible = pointer.active || Date.now() - pointer.lastActive < 1400;
+    const pointerVisible =
+      pointer.active || pointer.charge > 0.05 || Date.now() - pointer.lastActive < 1400;
     const nodes = pointerVisible ? [...particles, pointer] : particles;
 
     ctx.save();
@@ -338,7 +438,8 @@ const initQuantumBackground = () => {
     nodes.forEach((node) => drawParticle(node, node === pointer ? 1.4 : 1));
     ctx.restore();
 
-    drawConnections(nodes);
+    drawConnections(nodes, timeline);
+    drawPulses();
   };
 
   const start = () => {
@@ -353,7 +454,10 @@ const initQuantumBackground = () => {
     setCanvasSize();
     populateParticles();
     updateColors();
-    render();
+    pulses = [];
+    timeline = 0;
+    lastTimestamp = performance.now();
+    render(lastTimestamp);
   };
 
   reduceMotionQuery.addEventListener('change', start);
@@ -364,35 +468,103 @@ const initQuantumBackground = () => {
     populateParticles();
   });
 
-  const activatePointer = (x, y) => {
-    pointer.targetX = x;
-    pointer.targetY = y;
+  const activatePointer = (x, y, boost = 0) => {
+    const safeX = Number.isFinite(x) ? x : width / 2;
+    const safeY = Number.isFinite(y) ? y : height / 2;
+    pointer.targetX = safeX;
+    pointer.targetY = safeY;
     pointer.active = true;
+    pointer.lastActive = Date.now();
+    if (boost > 0) {
+      pointer.charge = Math.min(1.4, pointer.charge + boost);
+    }
+  };
+
+  const releasePointer = () => {
+    pointer.active = false;
     pointer.lastActive = Date.now();
   };
 
-  window.addEventListener('mousemove', (event) => {
-    activatePointer(event.clientX, event.clientY);
-  });
+  const createPulse = (x, y, strength = 1) => {
+    const safeX = Number.isFinite(x) ? x : width / 2;
+    const safeY = Number.isFinite(y) ? y : height / 2;
+    pulses.push({ x: safeX, y: safeY, radius: 0, alpha: 0.72 * strength, strength });
+  };
 
-  window.addEventListener('mouseleave', () => {
-    pointer.active = false;
-    pointer.lastActive = Date.now();
-  });
+  let lastPointerDown = 0;
+  const supportsPointerEvents = 'onpointermove' in window;
 
-  window.addEventListener(
-    'touchmove',
-    (event) => {
-      const touch = event.touches[0];
-      if (!touch) return;
-      activatePointer(touch.clientX, touch.clientY);
-    },
-    { passive: true }
-  );
+  if (supportsPointerEvents) {
+    window.addEventListener('pointermove', (event) => {
+      if (!event.isPrimary) return;
+      activatePointer(event.clientX, event.clientY);
+    });
 
-  window.addEventListener('touchend', () => {
-    pointer.active = false;
-    pointer.lastActive = Date.now();
+    window.addEventListener('pointerdown', (event) => {
+      if (!event.isPrimary) return;
+      lastPointerDown = performance.now();
+      activatePointer(event.clientX, event.clientY, event.pointerType === 'touch' ? 0.95 : 0.75);
+      createPulse(event.clientX, event.clientY, event.pointerType === 'touch' ? 1.3 : 1);
+    });
+
+    window.addEventListener('pointerup', releasePointer);
+    window.addEventListener('pointercancel', releasePointer);
+    window.addEventListener('pointerleave', releasePointer);
+  } else {
+    window.addEventListener('mousemove', (event) => {
+      activatePointer(event.clientX, event.clientY);
+    });
+
+    window.addEventListener('mousedown', (event) => {
+      lastPointerDown = performance.now();
+      activatePointer(event.clientX, event.clientY, 0.75);
+      createPulse(event.clientX, event.clientY, 1);
+    });
+
+    window.addEventListener('mouseup', releasePointer);
+
+    window.addEventListener(
+      'touchmove',
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        activatePointer(touch.clientX, touch.clientY);
+      },
+      { passive: true }
+    );
+
+    window.addEventListener(
+      'touchstart',
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        lastPointerDown = performance.now();
+        activatePointer(touch.clientX, touch.clientY, 0.95);
+        createPulse(touch.clientX, touch.clientY, 1.35);
+      },
+      { passive: true }
+    );
+
+    window.addEventListener('touchend', releasePointer);
+    window.addEventListener('touchcancel', releasePointer);
+  }
+
+  window.addEventListener('click', (event) => {
+    if (performance.now() - lastPointerDown < 280) return;
+
+    if (event.detail === 0 && document.activeElement) {
+      const rect = document.activeElement.getBoundingClientRect?.();
+      if (rect) {
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        createPulse(centerX, centerY, 0.7);
+        activatePointer(centerX, centerY, 0.4);
+        return;
+      }
+    }
+
+    createPulse(event.clientX, event.clientY, 0.75);
+    activatePointer(event.clientX, event.clientY, 0.4);
   });
 
   document.addEventListener('visibilitychange', () => {

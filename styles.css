@@ -58,18 +58,25 @@ body {
   height: 100vh;
   pointer-events: none;
   z-index: -4;
-  opacity: 0.75;
-  transition: opacity 0.6s ease;
-  mix-blend-mode: screen;
+  opacity: 0.78;
+  transition: opacity 0.6s ease, filter 0.6s ease;
+  mix-blend-mode: normal;
+  filter: saturate(1.1) contrast(1.05);
 }
 
 .background-canvas.is-reduced {
   display: none;
 }
 
+body:not(.dark) .background-canvas {
+  opacity: 0.85;
+  filter: saturate(1.2) contrast(1.08);
+}
+
 body.dark .background-canvas {
-  opacity: 0.9;
-  mix-blend-mode: lighten;
+  opacity: 0.92;
+  mix-blend-mode: screen;
+  filter: saturate(1.25) contrast(1.1);
 }
 
 body::before,
