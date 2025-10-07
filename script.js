@@ -272,6 +272,7 @@ const initQuantumBackground = () => {
   let particles = [];
   let pulses = [];
   let traces = [];
+  let ripples = [];
   let lastTimestamp = performance.now();
   let timeline = 0;
   let colors = {
@@ -307,6 +308,8 @@ const initQuantumBackground = () => {
     lastActive: 0,
     charge: 0,
   };
+
+  let hasWindowFocus = document.hasFocus();
 
   const setCanvasSize = () => {
     const prevWidth = width;
@@ -405,10 +408,20 @@ const initQuantumBackground = () => {
         life: 0,
         isRemote: true,
         lastPulse: 0,
+        renderCore: false,
+        renderConnections: false,
       });
     }
 
-    return remotePointers.get(id);
+    const remote = remotePointers.get(id);
+    if (typeof remote.renderCore === 'undefined') {
+      remote.renderCore = false;
+    }
+    if (typeof remote.renderConnections === 'undefined') {
+      remote.renderConnections = false;
+    }
+
+    return remote;
   };
 
   const normalized = (value, max) => (max ? clamp(value / max, 0, 1) : 0.5);
@@ -532,9 +545,29 @@ const initQuantumBackground = () => {
     addTrace(safeX, safeY, energy, true);
   };
 
+  const createRipple = (x, y, strength = 1, remote = false) => {
+    const safeX = Number.isFinite(x) ? x : width / 2;
+    const safeY = Number.isFinite(y) ? y : height / 2;
+    const safeStrength = clamp(strength, 0.35, 2.2);
+    const waveCount = 3;
+    const speed = 0.012 + safeStrength * 0.0065;
+
+    for (let i = 0; i < waveCount; i += 1) {
+      ripples.push({
+        x: safeX,
+        y: safeY,
+        progress: -i * 0.18,
+        speed: speed * (1 + i * 0.18),
+        strength: safeStrength,
+        remote,
+      });
+    }
+  };
+
   const spawnBurst = (x, y, strength = 1, remote = false) => {
     const safeStrength = clamp(strength, 0.3, 2.2);
     createPulse(x, y, safeStrength);
+    createRipple(x, y, safeStrength, remote);
     leaveTrace(x, y, safeStrength * 0.7, remote, true);
   };
 
@@ -633,6 +666,14 @@ const initQuantumBackground = () => {
       pulse.radius += frame * (42 + pulse.strength * 64);
       pulse.alpha *= Math.pow(0.88, frame);
       return pulse.alpha > 0.05;
+    });
+  };
+
+  const updateRipples = (delta) => {
+    const frame = delta / 16 || 1;
+    ripples = ripples.filter((ripple) => {
+      ripple.progress += ripple.speed * frame;
+      return ripple.progress < 1.25;
     });
   };
 
@@ -795,6 +836,40 @@ const initQuantumBackground = () => {
     });
   };
 
+  const drawRipples = () => {
+    if (!ripples.length) return;
+
+    ripples.forEach((ripple) => {
+      if (ripple.progress <= 0) return;
+
+      const eased = Math.min(1, ripple.progress);
+      const radius = 28 + eased * (320 + ripple.strength * 140);
+      const alpha = (1 - eased) * (ripple.remote ? 0.22 : 0.3) * (0.8 + ripple.strength * 0.25);
+
+      if (alpha <= 0.01) {
+        return;
+      }
+
+      const inner = radius * 0.55;
+      const gradient = ctx.createRadialGradient(ripple.x, ripple.y, inner, ripple.x, ripple.y, radius);
+      gradient.addColorStop(0, 'transparent');
+      gradient.addColorStop(0.65, ripple.remote ? colors.glowSecondary : colors.glow);
+      gradient.addColorStop(1, 'transparent');
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = 2.8 + ripple.strength * 3.2;
+      ctx.strokeStyle = gradient;
+      ctx.shadowColor = ripple.remote ? colors.glow : colors.glowSecondary;
+      ctx.shadowBlur = 18 + ripple.strength * 22;
+      ctx.beginPath();
+      ctx.arc(ripple.x, ripple.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    });
+  };
+
   const render = (timestamp) => {
     animationFrame = requestAnimationFrame(render);
 
@@ -821,23 +896,34 @@ const initQuantumBackground = () => {
     updatePointer(delta);
     updateRemotePointers(delta);
     updatePulses(delta);
+    updateRipples(delta);
     updateTraces(delta);
 
     const pointerVisible =
-      pointer.active || pointer.charge > 0.05 || Date.now() - pointer.lastActive < 1400;
+      hasWindowFocus &&
+      (pointer.active || pointer.charge > 0.05 || Date.now() - pointer.lastActive < 1400);
     const remoteNodes = remotePointers.size ? Array.from(remotePointers.values()) : [];
-    const nodes = pointerVisible
-      ? [...particles, pointer, ...remoteNodes]
-      : [...particles, ...remoteNodes];
+    const pointerNodes = pointerVisible ? [pointer] : [];
+    const renderNodes = [
+      ...particles,
+      ...pointerNodes,
+      ...remoteNodes.filter((node) => node.renderCore !== false),
+    ];
+    const connectionNodes = [
+      ...particles,
+      ...pointerNodes,
+      ...remoteNodes.filter((node) => node.renderConnections !== false),
+    ];
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    nodes.forEach((node) => drawParticle(node, node === pointer || node.isRemote ? 1.25 : 1));
+    renderNodes.forEach((node) => drawParticle(node, node === pointer || node.isRemote ? 1.25 : 1));
     ctx.restore();
 
-    drawConnections(nodes, timeline);
+    drawConnections(connectionNodes, timeline);
     drawTraces();
     drawPulses();
+    drawRipples();
   };
 
   const start = () => {
@@ -854,8 +940,12 @@ const initQuantumBackground = () => {
     updateColors();
     pulses = [];
     traces = [];
+    ripples = [];
     timeline = 0;
     lastTimestamp = performance.now();
+    pointer.active = false;
+    pointer.charge = 0;
+    pointer.lastActive = 0;
     render(lastTimestamp);
   };
 
@@ -980,6 +1070,19 @@ const initQuantumBackground = () => {
     window.addEventListener('touchcancel', releasePointer);
   }
 
+  window.addEventListener('focus', () => {
+    hasWindowFocus = true;
+    pointer.lastActive = 0;
+  });
+
+  window.addEventListener('blur', () => {
+    hasWindowFocus = false;
+    pointer.active = false;
+    pointer.charge = 0;
+    pointer.lastActive = 0;
+    broadcastPointer(pointer.x, pointer.y, 0, true);
+  });
+
   window.addEventListener('click', (event) => {
     if (performance.now() - lastPointerDown < 280) return;
 
@@ -1027,7 +1130,12 @@ const initQuantumBackground = () => {
   });
 
   document.addEventListener('visibilitychange', () => {
+    hasWindowFocus = !document.hidden && document.hasFocus();
+
     if (document.hidden) {
+      pointer.active = false;
+      pointer.charge = 0;
+      pointer.lastActive = 0;
       cancelAnimationFrame(animationFrame);
     } else {
       start();
