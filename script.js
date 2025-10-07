@@ -13,29 +13,3 @@ toggle.addEventListener('click', () => {
   toggle.setAttribute('aria-pressed', dark);
   localStorage.setItem('theme', dark ? 'dark' : 'light');
 });
-
-document.querySelectorAll('img[data-fallback]').forEach((img) => {
-  const container = img.closest('.app-card__media, .portrait');
-  if (!container) return;
-
-  const showImage = () => {
-    img.classList.remove('is-hidden');
-    container.classList.add('has-image');
-  };
-
-  const hideImage = () => {
-    img.classList.add('is-hidden');
-    container.classList.remove('has-image');
-  };
-
-  if (img.complete) {
-    if (img.naturalWidth && img.naturalHeight) {
-      showImage();
-    } else {
-      hideImage();
-    }
-  } else {
-    img.addEventListener('load', showImage, { once: true });
-    img.addEventListener('error', hideImage, { once: true });
-  }
-});
