@@ -113,6 +113,94 @@ document.querySelectorAll('.asset-image').forEach((img) => {
   })();
 });
 
+const createCrossWindowBridge = (() => {
+  const seen = new Set();
+
+  return (storageKey, channelName) => {
+    const listeners = new Set();
+    const bridgeId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    let channel = null;
+
+    const dispatch = (payload) => {
+      if (!payload || payload.id === bridgeId) return;
+      const signature = `${payload.id}:${payload.timestamp}`;
+      if (seen.has(signature)) return;
+      seen.add(signature);
+      if (seen.size > 2000) {
+        const oldest = seen.values().next().value;
+        if (oldest) {
+          seen.delete(oldest);
+        }
+      }
+
+      listeners.forEach((listener) => listener(payload));
+    };
+
+    if ('BroadcastChannel' in window) {
+      channel = new BroadcastChannel(channelName);
+      channel.addEventListener('message', (event) => {
+        if (!event?.data) return;
+        dispatch(event.data);
+      });
+    }
+
+    const storageHandler = (event) => {
+      if (event.key !== storageKey || !event.newValue) return;
+      try {
+        const payload = JSON.parse(event.newValue);
+        dispatch(payload);
+      } catch (error) {
+        // ignore malformed payloads
+      }
+    };
+
+    window.addEventListener('storage', storageHandler);
+
+    const emit = (type, data, { flush = false } = {}) => {
+      const payload = {
+        id: bridgeId,
+        type,
+        data,
+        timestamp: Date.now(),
+      };
+
+      if (channel) {
+        channel.postMessage(payload);
+      }
+
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(payload));
+        if (flush) {
+          localStorage.removeItem(storageKey);
+        }
+      } catch (error) {
+        // localStorage may be unavailable
+      }
+    };
+
+    const subscribe = (listener) => {
+      if (typeof listener !== 'function') return () => {};
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    };
+
+    const destroy = () => {
+      if (channel) {
+        channel.close();
+      }
+      window.removeEventListener('storage', storageHandler);
+      listeners.clear();
+    };
+
+    return {
+      id: bridgeId,
+      emit,
+      subscribe,
+      destroy,
+    };
+  };
+})();
+
 const animatedElements = document.querySelectorAll('[data-animate]');
 
 if (animatedElements.length) {
@@ -183,6 +271,7 @@ const initQuantumBackground = () => {
   let animationFrame;
   let particles = [];
   let pulses = [];
+  let traces = [];
   let lastTimestamp = performance.now();
   let timeline = 0;
   let colors = {
@@ -191,12 +280,13 @@ const initQuantumBackground = () => {
   };
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
-  const broadcastKey = 'quantum:interaction';
-  const broadcastId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  let lastBroadcastTime = 0;
+  const bridge = createCrossWindowBridge('quantum:interaction', 'quantum-entanglement');
+  const broadcastId = bridge.id;
 
   let detailLevel = 1;
   let averageDelta = 16;
+  let lastTraceBroadcast = 0;
+  let lastLocalTrace = 0;
 
   const remotePointers = new Map();
 
@@ -323,26 +413,6 @@ const initQuantumBackground = () => {
 
   const normalized = (value, max) => (max ? clamp(value / max, 0, 1) : 0.5);
 
-  const sendInteraction = (type, data, urgent = false) => {
-    try {
-      localStorage.setItem(
-        broadcastKey,
-        JSON.stringify({
-          id: broadcastId,
-          type,
-          data,
-          timestamp: Date.now(),
-        })
-      );
-
-      if (urgent) {
-        localStorage.removeItem(broadcastKey);
-      }
-    } catch (error) {
-      // localStorage may be unavailable (private mode, etc.)
-    }
-  };
-
   let lastPointerBroadcast = 0;
 
   const broadcastPointer = (x, y, charge = 0, force = false) => {
@@ -350,7 +420,7 @@ const initQuantumBackground = () => {
     if (!force && now - lastPointerBroadcast < 60) return;
     lastPointerBroadcast = now;
 
-    sendInteraction('pointer', {
+    bridge.emit('pointer', {
       x: normalized(x, width),
       y: normalized(y, height),
       charge: clamp(charge, 0, 1.4),
@@ -358,7 +428,7 @@ const initQuantumBackground = () => {
   };
 
   const broadcastPulse = (x, y, strength, charge = 0) => {
-    sendInteraction(
+    bridge.emit(
       'pulse',
       {
         x: normalized(x, width),
@@ -366,8 +436,20 @@ const initQuantumBackground = () => {
         strength,
         charge: clamp(charge, 0, 1.4),
       },
-      true
+      { flush: true }
     );
+  };
+
+  const broadcastTrace = (x, y, energy = 0.3, force = false) => {
+    const now = performance.now();
+    if (!force && now - lastTraceBroadcast < 110) return;
+    lastTraceBroadcast = now;
+
+    bridge.emit('trace', {
+      x: normalized(x, width),
+      y: normalized(y, height),
+      energy: clamp(energy, 0, 1.8),
+    });
   };
 
   const handleRemotePointer = (id, data = {}) => {
@@ -386,9 +468,11 @@ const initQuantumBackground = () => {
     remote.charge = Math.max(remote.charge || 0, charge);
     remote.life = 2000;
 
+    leaveTrace(x, y, 0.22 + charge * 0.55, true);
+
     const now = Date.now();
     if (!remote.lastPulse || now - remote.lastPulse > 480) {
-      createPulse(x, y, 0.45 + charge * 0.4);
+      spawnBurst(x, y, 0.45 + charge * 0.4, true);
       remote.lastPulse = now;
     }
   };
@@ -405,11 +489,63 @@ const initQuantumBackground = () => {
 
     const now = Date.now();
     if (!remote.lastPulse || now - remote.lastPulse > 220) {
-      createPulse(x, y, strength);
+      spawnBurst(x, y, strength, true);
       remote.lastPulse = now;
     }
 
     remote.charge = Math.max(remote.charge || 0, clamp(data.charge ?? strength * 0.4, 0, 1.2));
+  };
+
+  const addTrace = (x, y, energy = 0.3, remote = false) => {
+    const safeX = Number.isFinite(x) ? x : width / 2;
+    const safeY = Number.isFinite(y) ? y : height / 2;
+    const normalizedEnergy = clamp(energy, 0.05, 1.8);
+
+    traces.push({
+      x: safeX,
+      y: safeY,
+      energy: normalizedEnergy,
+      radius: 18 + normalizedEnergy * 42,
+      thickness: 1.1 + normalizedEnergy * 2.6,
+      alpha: 0.28 + normalizedEnergy * 0.45,
+      rotation: Math.random() * Math.PI * 2,
+      spin: (remote ? -1 : 1) * (0.0006 + Math.random() * 0.0018),
+      span: (0.45 + Math.random() * 0.9) * Math.PI,
+      remote,
+      life: 900 + normalizedEnergy * 900,
+    });
+  };
+
+  const leaveTrace = (x, y, energy = 0.3, remote = false, force = false) => {
+    const safeX = Number.isFinite(x) ? x : width / 2;
+    const safeY = Number.isFinite(y) ? y : height / 2;
+
+    if (!remote) {
+      const now = performance.now();
+      if (!force && now - lastLocalTrace < 60) return;
+      lastLocalTrace = now;
+      addTrace(safeX, safeY, energy, false);
+      broadcastTrace(safeX, safeY, energy, force);
+      return;
+    }
+
+    addTrace(safeX, safeY, energy, true);
+  };
+
+  const spawnBurst = (x, y, strength = 1, remote = false) => {
+    const safeStrength = clamp(strength, 0.3, 2.2);
+    createPulse(x, y, safeStrength);
+    leaveTrace(x, y, safeStrength * 0.7, remote, true);
+  };
+
+  const handleRemoteTrace = (data = {}) => {
+    const normX = clamp(data.x ?? 0.5, 0, 1);
+    const normY = clamp(data.y ?? 0.5, 0, 1);
+    const x = normX * width;
+    const y = normY * height;
+    const energy = clamp(data.energy ?? 0.3, 0.05, 1.8);
+
+    leaveTrace(x, y, energy, true, true);
   };
 
   const updatePointer = (delta) => {
@@ -476,8 +612,8 @@ const initQuantumBackground = () => {
           const remoteInfluence =
             (1 - remoteDistance / fieldRadius) * (0.18 + (remote.charge || 0) * 0.4);
 
-          particle.vx += ((rdx / remoteDistance) * remoteInfluence * 0.025 * frame);
-          particle.vy += ((rdy / remoteDistance) * remoteInfluence * 0.025 * frame);
+          particle.vx += ((rdx / remoteDistance) * remoteInfluence * 0.038 * frame);
+          particle.vy += ((rdy / remoteDistance) * remoteInfluence * 0.038 * frame);
         });
       }
 
@@ -497,6 +633,18 @@ const initQuantumBackground = () => {
       pulse.radius += frame * (42 + pulse.strength * 64);
       pulse.alpha *= Math.pow(0.88, frame);
       return pulse.alpha > 0.05;
+    });
+  };
+
+  const updateTraces = (delta) => {
+    const frame = delta / 16 || 1;
+    traces = traces.filter((trace) => {
+      trace.life -= delta;
+      trace.radius += frame * (8 + trace.energy * 28);
+      trace.alpha *= Math.pow(0.88, frame);
+      trace.rotation += trace.spin * delta;
+      trace.span = Math.min(Math.PI * 1.8, trace.span + 0.0015 * delta);
+      return trace.life > 0 && trace.alpha > 0.03;
     });
   };
 
@@ -585,6 +733,40 @@ const initQuantumBackground = () => {
     });
   };
 
+  const drawTraces = () => {
+    if (!traces.length) return;
+
+    traces.forEach((trace) => {
+      const radius = trace.radius;
+      const gradient = ctx.createLinearGradient(
+        trace.x - radius,
+        trace.y - radius,
+        trace.x + radius,
+        trace.y + radius
+      );
+
+      if (trace.remote) {
+        gradient.addColorStop(0, colors.glowSecondary);
+        gradient.addColorStop(1, colors.glow);
+      } else {
+        gradient.addColorStop(0, colors.glow);
+        gradient.addColorStop(1, colors.glowSecondary);
+      }
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.globalAlpha = trace.alpha;
+      ctx.lineWidth = trace.thickness;
+      ctx.shadowColor = trace.remote ? colors.glow : colors.glowSecondary;
+      ctx.shadowBlur = 18 + trace.energy * 26;
+      ctx.strokeStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(trace.x, trace.y, radius, trace.rotation, trace.rotation + trace.span);
+      ctx.stroke();
+      ctx.restore();
+    });
+  };
+
   const drawPulses = () => {
     pulses.forEach((pulse) => {
       const gradient = ctx.createRadialGradient(
@@ -639,6 +821,7 @@ const initQuantumBackground = () => {
     updatePointer(delta);
     updateRemotePointers(delta);
     updatePulses(delta);
+    updateTraces(delta);
 
     const pointerVisible =
       pointer.active || pointer.charge > 0.05 || Date.now() - pointer.lastActive < 1400;
@@ -653,6 +836,7 @@ const initQuantumBackground = () => {
     ctx.restore();
 
     drawConnections(nodes, timeline);
+    drawTraces();
     drawPulses();
   };
 
@@ -669,6 +853,7 @@ const initQuantumBackground = () => {
     populateParticles(true);
     updateColors();
     pulses = [];
+    traces = [];
     timeline = 0;
     lastTimestamp = performance.now();
     render(lastTimestamp);
@@ -713,6 +898,7 @@ const initQuantumBackground = () => {
     window.addEventListener('pointermove', (event) => {
       if (!event.isPrimary) return;
       activatePointer(event.clientX, event.clientY);
+      leaveTrace(event.clientX, event.clientY, 0.18 + pointer.charge * 0.8);
       broadcastPointer(
         event.clientX,
         event.clientY,
@@ -723,12 +909,14 @@ const initQuantumBackground = () => {
     window.addEventListener('pointerdown', (event) => {
       if (!event.isPrimary) return;
       lastPointerDown = performance.now();
-      activatePointer(event.clientX, event.clientY, event.pointerType === 'touch' ? 0.95 : 0.75);
-      createPulse(event.clientX, event.clientY, event.pointerType === 'touch' ? 1.3 : 1);
+      const boost = event.pointerType === 'touch' ? 0.95 : 0.75;
+      const burst = event.pointerType === 'touch' ? 1.3 : 1;
+      activatePointer(event.clientX, event.clientY, boost);
+      spawnBurst(event.clientX, event.clientY, burst);
       broadcastPulse(
         event.clientX,
         event.clientY,
-        event.pointerType === 'touch' ? 1.3 : 1,
+        burst,
         pointer.charge
       );
       broadcastPointer(event.clientX, event.clientY, pointer.charge);
@@ -740,6 +928,7 @@ const initQuantumBackground = () => {
   } else {
     window.addEventListener('mousemove', (event) => {
       activatePointer(event.clientX, event.clientY);
+      leaveTrace(event.clientX, event.clientY, 0.18 + pointer.charge * 0.8);
       broadcastPointer(
         event.clientX,
         event.clientY,
@@ -750,7 +939,7 @@ const initQuantumBackground = () => {
     window.addEventListener('mousedown', (event) => {
       lastPointerDown = performance.now();
       activatePointer(event.clientX, event.clientY, 0.75);
-      createPulse(event.clientX, event.clientY, 1);
+      spawnBurst(event.clientX, event.clientY, 1);
       broadcastPulse(event.clientX, event.clientY, 1, pointer.charge);
       broadcastPointer(event.clientX, event.clientY, pointer.charge);
     });
@@ -763,6 +952,7 @@ const initQuantumBackground = () => {
         const touch = event.touches[0];
         if (!touch) return;
         activatePointer(touch.clientX, touch.clientY);
+        leaveTrace(touch.clientX, touch.clientY, 0.2 + pointer.charge * 0.8);
         broadcastPointer(
           touch.clientX,
           touch.clientY,
@@ -779,7 +969,7 @@ const initQuantumBackground = () => {
         if (!touch) return;
         lastPointerDown = performance.now();
         activatePointer(touch.clientX, touch.clientY, 0.95);
-        createPulse(touch.clientX, touch.clientY, 1.35);
+        spawnBurst(touch.clientX, touch.clientY, 1.35);
         broadcastPulse(touch.clientX, touch.clientY, 1.35, pointer.charge);
         broadcastPointer(touch.clientX, touch.clientY, pointer.charge);
       },
@@ -798,30 +988,23 @@ const initQuantumBackground = () => {
       if (rect) {
         const centerX = rect.left + rect.width / 2;
         const centerY = rect.top + rect.height / 2;
-        createPulse(centerX, centerY, 0.7);
         activatePointer(centerX, centerY, 0.4);
+        spawnBurst(centerX, centerY, 0.7);
+        broadcastPulse(centerX, centerY, 0.7, pointer.charge);
+        broadcastPointer(centerX, centerY, pointer.charge);
         return;
       }
     }
 
-    createPulse(event.clientX, event.clientY, 0.75);
     activatePointer(event.clientX, event.clientY, 0.4);
+    spawnBurst(event.clientX, event.clientY, 0.75);
     broadcastPulse(event.clientX, event.clientY, 0.75, pointer.charge);
     broadcastPointer(event.clientX, event.clientY, pointer.charge);
   });
 
-  window.addEventListener('storage', (event) => {
-    if (event.key !== broadcastKey || !event.newValue) return;
-
-    let payload;
-    try {
-      payload = JSON.parse(event.newValue);
-    } catch (error) {
-      return;
-    }
-
+  bridge.subscribe((payload) => {
     if (!payload || payload.id === broadcastId) return;
-    if (payload.timestamp && Date.now() - payload.timestamp > 2500) return;
+    if (payload.timestamp && Date.now() - payload.timestamp > 4000) return;
 
     switch (payload.type) {
       case 'pointer':
@@ -829,6 +1012,14 @@ const initQuantumBackground = () => {
         break;
       case 'pulse':
         handleRemotePulse(payload.id, payload.data);
+        break;
+      case 'trace':
+        handleRemoteTrace(payload.data);
+        break;
+      case 'leave':
+        if (payload.id) {
+          remotePointers.delete(payload.id);
+        }
         break;
       default:
         break;
@@ -844,6 +1035,8 @@ const initQuantumBackground = () => {
   });
 
   window.addEventListener('beforeunload', () => {
+    bridge.emit('leave', {}, { flush: true });
+    bridge.destroy();
     if (remotePointers.has(broadcastId)) {
       remotePointers.delete(broadcastId);
     }
