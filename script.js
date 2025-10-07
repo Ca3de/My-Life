@@ -189,6 +189,16 @@ const initQuantumBackground = () => {
     glow: '#4a60ff',
     glowSecondary: '#8b5cf6',
   };
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  const broadcastKey = 'quantum:interaction';
+  const broadcastId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let lastBroadcastTime = 0;
+
+  let detailLevel = 1;
+  let averageDelta = 16;
+
+  const remotePointers = new Map();
 
   const connectionLayers = [
     { alpha: 0.68, lineWidth: 0.95, swing: 5, phase: 0 },
@@ -209,6 +219,9 @@ const initQuantumBackground = () => {
   };
 
   const setCanvasSize = () => {
+    const prevWidth = width;
+    const prevHeight = height;
+
     width = window.innerWidth;
     height = window.innerHeight;
     dpr = Math.min(2.5, window.devicePixelRatio || 1);
@@ -225,6 +238,17 @@ const initQuantumBackground = () => {
       pointer.targetX = pointer.x;
       pointer.targetY = pointer.y;
     }
+
+    if (prevWidth && prevHeight && remotePointers.size) {
+      const scaleX = width / prevWidth;
+      const scaleY = height / prevHeight;
+      remotePointers.forEach((node) => {
+        node.x *= scaleX;
+        node.y *= scaleY;
+        node.targetX *= scaleX;
+        node.targetY *= scaleY;
+      });
+    }
   };
 
   const updateColors = () => {
@@ -238,8 +262,10 @@ const initQuantumBackground = () => {
     };
   };
 
-  const particleCount = () => Math.floor(Math.min(200, (width * height) / 8500));
-  const maxDistance = () => Math.min(260, Math.max(180, Math.sqrt(width * height) * 0.2));
+  const computeParticleCount = () =>
+    Math.floor(Math.min(140 * detailLevel, (width * height) / (9000 / detailLevel)));
+  const maxDistance = () =>
+    Math.min(240, Math.max(160, Math.sqrt(width * height) * (0.18 + detailLevel * 0.04)));
 
   const createParticle = () => {
     const angle = Math.random() * Math.PI * 2;
@@ -258,8 +284,132 @@ const initQuantumBackground = () => {
     };
   };
 
-  const populateParticles = () => {
-    particles = Array.from({ length: particleCount() }, createParticle);
+  const populateParticles = (force = false) => {
+    const target = computeParticleCount();
+
+    if (force) {
+      particles = Array.from({ length: target }, createParticle);
+      return;
+    }
+
+    if (particles.length > target) {
+      particles.length = target;
+      return;
+    }
+
+    while (particles.length < target) {
+      particles.push(createParticle());
+    }
+  };
+
+  const ensureRemotePointer = (id) => {
+    if (!remotePointers.has(id)) {
+      remotePointers.set(id, {
+        x: width / 2,
+        y: height / 2,
+        targetX: width / 2,
+        targetY: height / 2,
+        radius: 2.1,
+        depth: 0.95,
+        charge: 0,
+        life: 0,
+        isRemote: true,
+        lastPulse: 0,
+      });
+    }
+
+    return remotePointers.get(id);
+  };
+
+  const normalized = (value, max) => (max ? clamp(value / max, 0, 1) : 0.5);
+
+  const sendInteraction = (type, data, urgent = false) => {
+    try {
+      localStorage.setItem(
+        broadcastKey,
+        JSON.stringify({
+          id: broadcastId,
+          type,
+          data,
+          timestamp: Date.now(),
+        })
+      );
+
+      if (urgent) {
+        localStorage.removeItem(broadcastKey);
+      }
+    } catch (error) {
+      // localStorage may be unavailable (private mode, etc.)
+    }
+  };
+
+  let lastPointerBroadcast = 0;
+
+  const broadcastPointer = (x, y, charge = 0, force = false) => {
+    const now = performance.now();
+    if (!force && now - lastPointerBroadcast < 60) return;
+    lastPointerBroadcast = now;
+
+    sendInteraction('pointer', {
+      x: normalized(x, width),
+      y: normalized(y, height),
+      charge: clamp(charge, 0, 1.4),
+    });
+  };
+
+  const broadcastPulse = (x, y, strength, charge = 0) => {
+    sendInteraction(
+      'pulse',
+      {
+        x: normalized(x, width),
+        y: normalized(y, height),
+        strength,
+        charge: clamp(charge, 0, 1.4),
+      },
+      true
+    );
+  };
+
+  const handleRemotePointer = (id, data = {}) => {
+    const remote = ensureRemotePointer(id);
+    const normX = clamp(data.x ?? 0.5, 0, 1);
+    const normY = clamp(data.y ?? 0.5, 0, 1);
+    const x = normX * width;
+    const y = normY * height;
+    const charge = clamp(data.charge ?? 0.35, 0, 1.2);
+
+    if (!Number.isFinite(remote.x)) remote.x = x;
+    if (!Number.isFinite(remote.y)) remote.y = y;
+
+    remote.targetX = x;
+    remote.targetY = y;
+    remote.charge = Math.max(remote.charge || 0, charge);
+    remote.life = 2000;
+
+    const now = Date.now();
+    if (!remote.lastPulse || now - remote.lastPulse > 480) {
+      createPulse(x, y, 0.45 + charge * 0.4);
+      remote.lastPulse = now;
+    }
+  };
+
+  const handleRemotePulse = (id, data = {}) => {
+    handleRemotePointer(id, data);
+
+    const remote = ensureRemotePointer(id);
+    const normX = clamp(data.x ?? 0.5, 0, 1);
+    const normY = clamp(data.y ?? 0.5, 0, 1);
+    const x = normX * width;
+    const y = normY * height;
+    const strength = clamp(data.strength ?? 0.75, 0.3, 2);
+
+    const now = Date.now();
+    if (!remote.lastPulse || now - remote.lastPulse > 220) {
+      createPulse(x, y, strength);
+      remote.lastPulse = now;
+    }
+
+    remote.charge = Math.max(remote.charge || 0, clamp(data.charge ?? strength * 0.4, 0, 1.2));
   };
 
   const updatePointer = (delta) => {
@@ -267,6 +417,24 @@ const initQuantumBackground = () => {
     pointer.x += (pointer.targetX - pointer.x) * smoothing;
     pointer.y += (pointer.targetY - pointer.y) * smoothing;
     pointer.charge *= Math.pow(0.92, delta / 16 || 1);
+  };
+
+  const updateRemotePointers = (delta) => {
+    if (!remotePointers.size) return;
+
+    const smoothing = 1 - Math.pow(0.85, delta / 16 || 1);
+    const fade = Math.pow(0.9, delta / 16 || 1);
+
+    remotePointers.forEach((node, id) => {
+      node.x += (node.targetX - node.x) * smoothing;
+      node.y += (node.targetY - node.y) * smoothing;
+      node.charge = (node.charge || 0) * fade;
+      node.life -= delta;
+
+      if (node.life <= 0) {
+        remotePointers.delete(id);
+      }
+    });
   };
 
   const updateParticles = (delta) => {
@@ -296,6 +464,23 @@ const initQuantumBackground = () => {
         particle.vy += ((dy / distance) * influence * chargeBoost * 0.04 * frame);
       }
 
+      if (remotePointers.size) {
+        remotePointers.forEach((remote) => {
+          const rdx = remote.x - particle.x;
+          const rdy = remote.y - particle.y;
+          const remoteDistanceSq = rdx * rdx + rdy * rdy;
+
+          if (remoteDistanceSq >= fieldRadius * fieldRadius) return;
+
+          const remoteDistance = Math.sqrt(remoteDistanceSq) || 1;
+          const remoteInfluence =
+            (1 - remoteDistance / fieldRadius) * (0.18 + (remote.charge || 0) * 0.4);
+
+          particle.vx += ((rdx / remoteDistance) * remoteInfluence * 0.025 * frame);
+          particle.vy += ((rdy / remoteDistance) * remoteInfluence * 0.025 * frame);
+        });
+      }
+
       particle.vx *= 0.992;
       particle.vy *= 0.992;
 
@@ -317,8 +502,11 @@ const initQuantumBackground = () => {
 
   const drawParticle = (node, intensity = 1) => {
     const depth = node.depth || 0.8;
-    const pulseBoost = node === pointer ? 1 + pointer.charge * 1.8 : 1;
-    const baseMultiplier = node === pointer ? 2.4 : 1.8 + depth * 0.2;
+    const isPointer = node === pointer;
+    const isRemote = Boolean(node.isRemote);
+    const nodeCharge = node.charge || 0;
+    const pulseBoost = isPointer ? 1 + pointer.charge * 1.8 : 1 + nodeCharge * 0.6;
+    const baseMultiplier = isPointer ? 2.4 : isRemote ? 2.1 : 1.8 + depth * 0.2;
     const radius = node.radius * baseMultiplier * pulseBoost;
     const gradient = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, radius * 3);
     gradient.addColorStop(0, colors.glow);
@@ -326,10 +514,10 @@ const initQuantumBackground = () => {
     gradient.addColorStop(1, 'transparent');
 
     ctx.save();
-    ctx.globalAlpha = 0.45 * intensity;
+    ctx.globalAlpha = (isPointer || isRemote ? 0.58 : 0.45) * intensity;
     ctx.fillStyle = gradient;
     ctx.shadowColor = colors.glowSecondary;
-    ctx.shadowBlur = 18 * intensity * (1 + (node.depth || 0.5) * 0.4);
+    ctx.shadowBlur = (isPointer ? 18 : 14) * intensity * (1 + (node.depth || 0.5) * 0.4);
     ctx.beginPath();
     ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     ctx.fill();
@@ -339,6 +527,9 @@ const initQuantumBackground = () => {
   const drawConnections = (nodes, elapsed) => {
     const limit = maxDistance();
     const limitSq = limit * limit;
+
+    const neighborCap = Math.max(4, Math.floor(6 + detailLevel * 6));
+    const stride = detailLevel < 0.75 ? 2 : 1;
 
     connectionLayers.forEach((layer) => {
       const offsetX = Math.cos(elapsed * 0.0008 + layer.phase) * layer.swing;
@@ -350,7 +541,12 @@ const initQuantumBackground = () => {
       ctx.shadowBlur = 12 + layer.swing * 0.8;
 
       for (let i = 0; i < nodes.length; i += 1) {
-        for (let j = i + 1; j < nodes.length; j += 1) {
+        let neighbors = 0;
+        let attempts = 0;
+
+        for (let j = i + stride; j < nodes.length && neighbors < neighborCap; j += stride) {
+          attempts += 1;
+          if (attempts > neighborCap * (detailLevel < 0.85 ? 3 : 4)) break;
           const a = nodes[i];
           const b = nodes[j];
           const dx = a.x - b.x;
@@ -381,6 +577,7 @@ const initQuantumBackground = () => {
           ctx.moveTo(startX, startY);
           ctx.lineTo(endX, endY);
           ctx.stroke();
+          neighbors += 1;
         }
       }
 
@@ -422,20 +619,37 @@ const initQuantumBackground = () => {
     const delta = Math.min(64, (timestamp || performance.now()) - lastTimestamp || 16);
     lastTimestamp = timestamp || performance.now();
     timeline += delta;
+    averageDelta = averageDelta * 0.9 + delta * 0.1;
+
+    let newDetail = detailLevel;
+    if (averageDelta > 28 && detailLevel > 0.55) {
+      newDetail = Math.max(0.55, detailLevel - 0.05);
+    } else if (averageDelta < 18 && detailLevel < 1.08) {
+      newDetail = Math.min(1.08, detailLevel + 0.03);
+    }
+
+    if (Math.abs(newDetail - detailLevel) > 0.005) {
+      detailLevel = newDetail;
+      populateParticles();
+    }
 
     ctx.clearRect(0, 0, width, height);
 
     updateParticles(delta);
     updatePointer(delta);
+    updateRemotePointers(delta);
     updatePulses(delta);
 
     const pointerVisible =
       pointer.active || pointer.charge > 0.05 || Date.now() - pointer.lastActive < 1400;
-    const nodes = pointerVisible ? [...particles, pointer] : particles;
+    const remoteNodes = remotePointers.size ? Array.from(remotePointers.values()) : [];
+    const nodes = pointerVisible
+      ? [...particles, pointer, ...remoteNodes]
+      : [...particles, ...remoteNodes];
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    nodes.forEach((node) => drawParticle(node, node === pointer ? 1.4 : 1));
+    nodes.forEach((node) => drawParticle(node, node === pointer || node.isRemote ? 1.25 : 1));
     ctx.restore();
 
     drawConnections(nodes, timeline);
@@ -452,7 +666,7 @@ const initQuantumBackground = () => {
 
     canvas.classList.remove('is-reduced');
     setCanvasSize();
-    populateParticles();
+    populateParticles(true);
     updateColors();
     pulses = [];
     timeline = 0;
@@ -483,6 +697,7 @@ const initQuantumBackground = () => {
   const releasePointer = () => {
     pointer.active = false;
     pointer.lastActive = Date.now();
+    broadcastPointer(pointer.x, pointer.y, 0, true);
   };
 
   const createPulse = (x, y, strength = 1) => {
@@ -498,6 +713,11 @@ const initQuantumBackground = () => {
     window.addEventListener('pointermove', (event) => {
       if (!event.isPrimary) return;
       activatePointer(event.clientX, event.clientY);
+      broadcastPointer(
+        event.clientX,
+        event.clientY,
+        pointer.active ? Math.max(pointer.charge, 0.25) : 0
+      );
     });
 
     window.addEventListener('pointerdown', (event) => {
@@ -505,6 +725,13 @@ const initQuantumBackground = () => {
       lastPointerDown = performance.now();
       activatePointer(event.clientX, event.clientY, event.pointerType === 'touch' ? 0.95 : 0.75);
       createPulse(event.clientX, event.clientY, event.pointerType === 'touch' ? 1.3 : 1);
+      broadcastPulse(
+        event.clientX,
+        event.clientY,
+        event.pointerType === 'touch' ? 1.3 : 1,
+        pointer.charge
+      );
+      broadcastPointer(event.clientX, event.clientY, pointer.charge);
     });
 
     window.addEventListener('pointerup', releasePointer);
@@ -513,12 +740,19 @@ const initQuantumBackground = () => {
   } else {
     window.addEventListener('mousemove', (event) => {
       activatePointer(event.clientX, event.clientY);
+      broadcastPointer(
+        event.clientX,
+        event.clientY,
+        pointer.active ? Math.max(pointer.charge, 0.25) : 0
+      );
     });
 
     window.addEventListener('mousedown', (event) => {
       lastPointerDown = performance.now();
       activatePointer(event.clientX, event.clientY, 0.75);
       createPulse(event.clientX, event.clientY, 1);
+      broadcastPulse(event.clientX, event.clientY, 1, pointer.charge);
+      broadcastPointer(event.clientX, event.clientY, pointer.charge);
     });
 
     window.addEventListener('mouseup', releasePointer);
@@ -529,6 +763,11 @@ const initQuantumBackground = () => {
         const touch = event.touches[0];
         if (!touch) return;
         activatePointer(touch.clientX, touch.clientY);
+        broadcastPointer(
+          touch.clientX,
+          touch.clientY,
+          pointer.active ? Math.max(pointer.charge, 0.25) : 0
+        );
       },
       { passive: true }
     );
@@ -541,6 +780,8 @@ const initQuantumBackground = () => {
         lastPointerDown = performance.now();
         activatePointer(touch.clientX, touch.clientY, 0.95);
         createPulse(touch.clientX, touch.clientY, 1.35);
+        broadcastPulse(touch.clientX, touch.clientY, 1.35, pointer.charge);
+        broadcastPointer(touch.clientX, touch.clientY, pointer.charge);
       },
       { passive: true }
     );
@@ -565,6 +806,33 @@ const initQuantumBackground = () => {
 
     createPulse(event.clientX, event.clientY, 0.75);
     activatePointer(event.clientX, event.clientY, 0.4);
+    broadcastPulse(event.clientX, event.clientY, 0.75, pointer.charge);
+    broadcastPointer(event.clientX, event.clientY, pointer.charge);
+  });
+
+  window.addEventListener('storage', (event) => {
+    if (event.key !== broadcastKey || !event.newValue) return;
+
+    let payload;
+    try {
+      payload = JSON.parse(event.newValue);
+    } catch (error) {
+      return;
+    }
+
+    if (!payload || payload.id === broadcastId) return;
+    if (payload.timestamp && Date.now() - payload.timestamp > 2500) return;
+
+    switch (payload.type) {
+      case 'pointer':
+        handleRemotePointer(payload.id, payload.data);
+        break;
+      case 'pulse':
+        handleRemotePulse(payload.id, payload.data);
+        break;
+      default:
+        break;
+    }
   });
 
   document.addEventListener('visibilitychange', () => {
@@ -572,6 +840,12 @@ const initQuantumBackground = () => {
       cancelAnimationFrame(animationFrame);
     } else {
       start();
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (remotePointers.has(broadcastId)) {
+      remotePointers.delete(broadcastId);
     }
   });
 
