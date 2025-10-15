@@ -2,7 +2,38 @@ document.documentElement.classList.add('js-enabled');
 document.getElementById('year').textContent = new Date().getFullYear();
 
 const toggle = document.getElementById('theme-toggle');
-const savedTheme = localStorage.getItem('theme');
+
+const themeStorage = (() => {
+  try {
+    const storage = window.localStorage;
+    const testKey = '__theme-check__';
+    storage.setItem(testKey, testKey);
+    storage.removeItem(testKey);
+    return storage;
+  } catch (error) {
+    return null;
+  }
+})();
+
+const getStoredTheme = () => {
+  if (!themeStorage) return null;
+  try {
+    return themeStorage.getItem('theme');
+  } catch (error) {
+    return null;
+  }
+};
+
+const setStoredTheme = (value) => {
+  if (!themeStorage) return;
+  try {
+    themeStorage.setItem('theme', value);
+  } catch (error) {
+    // ignore write failures
+  }
+};
+
+const savedTheme = getStoredTheme();
 
 const emitThemeChange = () => {
   const theme = document.body.classList.contains('dark') ? 'dark' : 'light';
@@ -17,7 +48,7 @@ if (savedTheme === 'dark') {
 toggle.addEventListener('click', () => {
   const dark = document.body.classList.toggle('dark');
   toggle.setAttribute('aria-pressed', dark);
-  localStorage.setItem('theme', dark ? 'dark' : 'light');
+  setStoredTheme(dark ? 'dark' : 'light');
   emitThemeChange();
 });
 
