@@ -120,10 +120,13 @@ const createCrossWindowBridge = (() => {
     const listeners = new Set();
     const bridgeId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     let channel = null;
+    let sequence = 0;
 
     const dispatch = (payload) => {
       if (!payload || payload.id === bridgeId) return;
-      const signature = `${payload.id}:${payload.timestamp}`;
+      const signature = `${payload.id}:${payload.timestamp}:${payload.type ?? ''}:${
+        payload.sequence ?? ''
+      }`;
       if (seen.has(signature)) return;
       seen.add(signature);
       if (seen.size > 2000) {
@@ -157,11 +160,13 @@ const createCrossWindowBridge = (() => {
     window.addEventListener('storage', storageHandler);
 
     const emit = (type, data, { flush = false } = {}) => {
+      sequence = (sequence + 1) % Number.MAX_SAFE_INTEGER;
       const payload = {
         id: bridgeId,
         type,
         data,
         timestamp: Date.now(),
+        sequence,
       };
 
       if (channel) {
